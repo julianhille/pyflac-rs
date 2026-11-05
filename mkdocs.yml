@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: 0BSD
+# Docs site for Read the Docs (https://pyflac-rs.readthedocs.io/). Build locally:
+#   pip install -r docs/requirements.txt
+#   cp README.md docs/index.md
+#   mkdocs serve
+site_name: pyflac-rs
+site_url: https://pyflac-rs.readthedocs.io/
+repo_url: https://github.com/julianhille/pyflac-rs
+# Relative to the repository root; scripts/mkdocs_hooks.py maps each page to its source.
+edit_uri: blob/main/
+copyright: 0BSD licensed
+theme: readthedocs
+strict: true
+# Broken anchors and links are only logged at INFO by default; fail on them.
+validation:
+  anchors: warn
+  unrecognized_links: warn
+  absolute_links: warn
+exclude_docs: requirements.txt
+hooks:
+  - scripts/mkdocs_hooks.py
+
+nav:
+  - Home: index.md
+  - Encoding and decoding: usage.md
+  - Remux and metadata: remux.md
+  - Async, threads and the GIL: concurrency.md
+  - API reference: api.md
+  - Benchmark: benchmark.md
+  - Releasing: releasing.md
+  - Third-party components: third-party.md

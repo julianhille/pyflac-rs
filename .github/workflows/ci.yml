@@ -1,0 +1,265 @@
+# SPDX-License-Identifier: 0BSD
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # The release workflow runs the whole suite on the tag before publishing.
+  workflow_call:
+  # Nightly: the full test tier (larger matrices, more property examples) on main.
+  schedule:
+    - cron: '23 3 * * *'
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  UV_LOCKED: '1'
+  PYFLAC_RS_TESTS: >-
+    ${{ (github.event_name == 'schedule' || startsWith(github.ref, 'refs/tags/v')) && 'full' || 'quick' }}
+
+jobs:
+  rust:
+    name: Rust formatting and lints
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+  deny:
+    name: Dependency licenses and advisories
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check licenses and advisories
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+
+  msrv:
+    name: Rust MSRV (Cargo.toml rust-version)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain (rust-version from Cargo.toml)
+        id: msrv
+        run: |
+          v=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          rustup toolchain install "$v" --profile minimal
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: msrv
+      # `+version` overrides rust-toolchain.toml.
+      - name: Check
+        run: cargo +${{ steps.msrv.outputs.version }} check --locked --all-targets
+
+  python-lint:
+    name: Python lints, changelog, license notices
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: '3.13'
+      # The ruff of uv.lock, without building the extension.
+      - name: Install ruff
+        run: uv sync --only-group dev --no-install-project
+      - name: Ruff (lint)
+        run: uv run --no-sync ruff check python tests scripts bench
+      - name: Ruff (format)
+        run: uv run --no-sync ruff format --check python tests scripts bench
+      - name: Changelog structure (merge=union can duplicate headings)
+        run: python3 scripts/release.py lint
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      # The notices depend on Cargo.lock, the crates' license files and
+      # scripts/licenses.py. They are committed, so the sdist and Read the Docs
+      # need no network access.
+      - name: Fetch the crate sources
+        run: cargo fetch --locked
+      - name: License notices are up to date
+        run: |
+          python3 scripts/licenses.py notices
+          python3 scripts/licenses.py page
+          git diff --exit-code THIRD_PARTY_LICENSES.md docs/third-party.md \
+            || { echo "::error::license notices are out of date; run scripts/licenses.py notices and page"; exit 1; }
+
+  test:
+    name: Tests (Python ${{ matrix.python }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ (github.event_name == 'schedule' || startsWith(github.ref, 'refs/tags/v')) && 120 || 30 }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-2025]
+        python: ['3.11', '3.12', '3.13', '3.14', '3.15']
+        include:
+          # Free-threaded CPython: abi3 does not apply, so these build a
+          # version-specific extension (the module declares gil_used = false).
+          - os: ubuntu-24.04
+            python: 3.14t
+          - os: ubuntu-24.04
+            python: 3.15t
+          - os: macos-15
+            python: 3.15t
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: py${{ matrix.python }}
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: ${{ matrix.python }}
+      # The reference CLI (flac, metaflac) checks the output. Windows runs
+      # without it; elsewhere the tests that need it fail instead of skipping.
+      - name: Test tools (flac CLI)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then sudo apt-get update -q && sudo apt-get install -yq flac
+          else brew install flac; fi
+          echo PYFLAC_RS_REQUIRE_TOOLS=1 >> "$GITHUB_ENV"
+      # uv builds the extension with maturin (PEP 517 builds are release builds).
+      - name: Build and install
+        run: uv sync --python ${{ matrix.python }}
+      - name: Show the build
+        run: uv run python -c "import sys, pyflac_rs; print(sys.version); print(pyflac_rs.__file__, pyflac_rs.LIBFLAC_VENDOR_STRING)"
+      - name: Run the tests
+        run: uv run pytest -q -ra
+
+  package:
+    name: Wheel and sdist contents
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: '3.11'
+      - name: Build the sdist, then a wheel from it
+        run: uv build --out-dir dist
+      - name: Check the contents
+        run: python3 scripts/check_dist.py dist
+      - name: Install the wheel on every Python and import it
+        run: |
+          for v in 3.11 3.12 3.13 3.14 3.15; do
+            uv venv -q -p "$v" "$RUNNER_TEMP/venv-$v"
+            uv pip install -q --no-index --python "$RUNNER_TEMP/venv-$v" dist/*.whl
+            "$RUNNER_TEMP/venv-$v/bin/python" -c "import pyflac_rs, importlib.metadata as m; print('$v', m.version('pyflac-rs'), [f.name for f in m.files('pyflac-rs') if 'licenses' in str(f)])"
+          done
+
+  reproducible:
+    name: Reproducible wheel build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out a first copy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: a
+      - name: Check out a second copy elsewhere
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: elsewhere/b
+      - name: Toolchain (rust-toolchain.toml)
+        working-directory: a
+        run: rustup toolchain install
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: '3.11'
+      # Two checkouts at different paths with separate target dirs: nothing
+      # from the build location may leak into the wheel.
+      - name: Build twice
+        run: |
+          for d in a elsewhere/b; do
+            n=${d##*/}
+            (cd "$d" && CARGO_TARGET_DIR="$RUNNER_TEMP/t-$n" uv build --wheel --out-dir "$RUNNER_TEMP/whl-$n")
+          done
+      - name: Compare
+        run: cmp "$RUNNER_TEMP"/whl-a/*.whl "$RUNNER_TEMP"/whl-b/*.whl
+
+  docs:
+    name: Docs site (MkDocs)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The Python that Read the Docs uses (.readthedocs.yaml).
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: '3.13'
+      - name: Install MkDocs
+        run: uv venv -q "$RUNNER_TEMP/venv" && VIRTUAL_ENV="$RUNNER_TEMP/venv" uv pip install -q -r docs/requirements.txt
+      # Warnings (broken links, missing pages) fail the build.
+      - name: Build the site like Read the Docs (strict)
+        run: cp README.md docs/index.md && "$RUNNER_TEMP/venv/bin/mkdocs" build --strict

@@ -1,0 +1,71 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigestsToSemver",
+    ":semanticCommitsDisabled",
+    ":dependencyDashboard"
+  ],
+  "description": "Cargo, uv (pyproject.toml + uv.lock), GitHub Actions (pinned to SHAs), the Rust toolchain and the docs requirements.",
+  "schedule": ["before 6am on monday"],
+  "timezone": "Europe/Berlin",
+  "lockFileMaintenance": { "enabled": true, "schedule": ["before 6am on monday"] },
+  "rangeStrategy": "auto",
+  "pip_requirements": { "managerFilePatterns": ["/^docs/requirements\\.txt$/"] },
+  "packageRules": [
+    {
+      "description": "libflac-rs is pinned exactly (=x.y.z): the bit-exact output and the vendored ogg.rs follow it. Review each bump, and regenerate the license notices.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["libflac-rs"],
+      "rangeStrategy": "pin",
+      "groupName": null,
+      "prBodyNotes": ["Run `python scripts/licenses.py notices && python scripts/licenses.py page` and commit the result."]
+    },
+    {
+      "description": "PyO3 releases go together.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["pyo3", "pyo3-ffi", "pyo3-build-config", "pyo3-macros"],
+      "groupName": "pyo3"
+    },
+    {
+      "description": "Other crate updates change THIRD_PARTY_LICENSES.md; CI fails until it is regenerated.",
+      "matchManagers": ["cargo"],
+      "prBodyNotes": ["Run `python scripts/licenses.py notices && python scripts/licenses.py page` and commit the result."]
+    },
+    {
+      "description": "One PR for all action pins.",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions",
+      "automerge": false
+    },
+    {
+      "description": "MkDocs and its pinned dependencies (docs/requirements.txt) together.",
+      "matchFileNames": ["docs/requirements.txt"],
+      "groupName": "docs requirements"
+    },
+    {
+      "description": "Dev and benchmark tools (uv dependency groups) together, minor and patch only.",
+      "matchManagers": ["pep621"],
+      "matchDepTypes": ["dependency-groups"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "Python dev tools"
+    },
+    {
+      "description": "The Rust toolchain pin also fixes the Rust std license texts (scripts/std-licenses/).",
+      "matchManagers": ["custom.regex"],
+      "matchDepNames": ["rust"],
+      "prBodyNotes": ["Check scripts/std-licenses/README.md and STD_TEXTS_RELEASE in scripts/licenses.py."]
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "The Rust toolchain in rust-toolchain.toml.",
+      "managerFilePatterns": ["/^rust-toolchain\\.toml$/"],
+      "matchStrings": ["channel = \"(?<currentValue>\\d+\\.\\d+\\.\\d+)\""],
+      "depNameTemplate": "rust",
+      "packageNameTemplate": "rust-lang/rust",
+      "datasourceTemplate": "github-releases"
+    }
+  ]
+}

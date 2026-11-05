@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: 0BSD
+[project]
+name = "pyflac-rs"
+description = "Async, GIL-free FLAC and Ogg FLAC encoding, decoding and remuxing backed by libflac-rs"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "0BSD"
+# Shipped in every wheel and the sdist under .dist-info/licenses/.
+license-files = ["LICENSE", "THIRD_PARTY_LICENSES.md"]
+authors = [{ name = "Julian Hille" }]
+keywords = ["flac", "ogg", "audio", "codec", "encoder", "decoder", "asyncio", "remux"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Rust",
+  "Topic :: Multimedia :: Sound/Audio :: Conversion",
+  "Typing :: Typed",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+numpy = ["numpy>=1.24"]
+
+[project.urls]
+Homepage = "https://github.com/julianhille/pyflac-rs"
+Documentation = "https://pyflac-rs.readthedocs.io/"
+Source = "https://github.com/julianhille/pyflac-rs"
+Changelog = "https://github.com/julianhille/pyflac-rs/blob/main/CHANGELOG.md"
+Issues = "https://github.com/julianhille/pyflac-rs/issues"
+
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+python-source = "python"
+module-name = "pyflac_rs._native"
+features = ["pyo3/extension-module"]
+locked = true
+include = [{ path = "rust-toolchain.toml", format = "sdist" }]
+exclude = [{ path = "tests/**", format = "sdist" }]
+
+# maturin's CycloneDX SBOM records the absolute build path, a random serial and
+# the build time, so wheels built from the same commit would differ. The crates
+# and their licenses are in THIRD_PARTY_LICENSES.md (and docs/third-party.md).
+[tool.maturin.sbom]
+rust = false
+
+[dependency-groups]
+dev = [
+  "maturin>=1.9,<2.0",
+  "numpy>=1.24",
+  "pytest>=8",
+  "pytest-timeout>=2.3",
+  "uvloop>=0.21; sys_platform != 'win32'",
+  "hypothesis>=6.100",
+  "ruff>=0.6",
+]
+bench = ["av>=14", "pyflac>=3; python_version < '3.14'", "soundfile>=0.12", "numpy>=1.24"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers"]
+timeout = 300
+markers = [
+  "full: slow exhaustive cases, run when PYFLAC_RS_TESTS=full",
+  "needs_tool(name, ...): needs these programs on PATH (see tests/conftest.py)",
+]
+
+[tool.ruff]
+line-length = 100
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["pyflac_rs"]

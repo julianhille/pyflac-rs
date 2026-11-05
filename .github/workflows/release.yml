@@ -1,0 +1,305 @@
+# SPDX-License-Identifier: 0BSD
+# Publishes a tag vX.Y.Z (or vX.Y.Z-rc.N) to PyPI and as a GitHub release.
+#
+# Releases are cut from a release/vX.Y.Z branch: `python scripts/release.py
+# prepare X.Y.Z` bumps the versions and dates the changelog, then the tag is
+# pushed. The tag must match Cargo.toml and CHANGELOG.md (`check`), the whole
+# CI suite runs on it, every wheel is built and tested on Python 3.11-3.15, and
+# only then is anything published.
+name: Release
+
+on:
+  push:
+    tags: ['v[0-9]*']
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Tag, versions and changelog agree
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the release
+        run: python3 scripts/release.py check "$GITHUB_REF_NAME" notes.md
+      - name: Keep the release notes
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: notes
+          path: notes.md
+          retention-days: 7
+
+  ci:
+    name: CI
+    needs: check
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  wheels:
+    name: Wheels (${{ matrix.platform }} ${{ matrix.target }})
+    needs: check
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: manylinux, runner: ubuntu-24.04, target: x86_64, manylinux: '2_17' }
+          - { platform: manylinux, runner: ubuntu-24.04, target: aarch64, manylinux: '2_17' }
+          - { platform: musllinux, runner: ubuntu-24.04, target: x86_64, manylinux: musllinux_1_2 }
+          - { platform: musllinux, runner: ubuntu-24.04, target: aarch64, manylinux: musllinux_1_2 }
+          - { platform: macos, runner: macos-15, target: x86_64 }
+          - { platform: macos, runner: macos-15, target: aarch64 }
+          - { platform: windows, runner: windows-2025, target: x64 }
+          - { platform: windows, runner: windows-11-arm, target: aarch64 }
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # One abi3 wheel serves CPython 3.11-3.15. Free-threaded CPython has no
+      # stable ABI, so it gets its own wheels: --find-interpreter builds one
+      # per free-threaded interpreter it finds (the Linux images ship them;
+      # macOS and Windows get them from setup-python).
+      - name: Set up Python (macOS, Windows)
+        if: matrix.platform == 'macos' || matrix.platform == 'windows'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: |
+            3.14t
+            3.15t
+            3.11
+          architecture: ${{ matrix.platform == 'windows' && matrix.target == 'x64' && 'x64' || '' }}
+      - name: Toolchain version (rust-toolchain.toml)
+        id: rust
+        shell: bash
+        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - name: Build the wheels
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          rust-toolchain: ${{ steps.rust.outputs.channel }}
+          args: --release --locked --out dist --find-interpreter
+      - name: Check the wheels
+        shell: bash
+        run: |
+          "$(command -v python3 || command -v python)" scripts/check_dist.py dist
+      - name: Upload the wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheels-${{ matrix.platform }}-${{ matrix.target }}
+          path: dist
+          retention-days: 7
+
+  sdist:
+    name: Source distribution
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: '3.11'
+      - name: Build the sdist
+        run: uv build --sdist --out-dir dist
+      # The sdist must build on its own, outside the repository.
+      - name: Build a wheel from the sdist
+        run: uv build --wheel --out-dir "$RUNNER_TEMP/from-sdist" dist/*.tar.gz
+      - name: Check
+        run: python3 scripts/check_dist.py dist && python3 scripts/check_dist.py "$RUNNER_TEMP/from-sdist"
+      - name: Upload the sdist
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdist
+          path: dist
+          retention-days: 7
+
+  test-wheels:
+    name: Test wheel (Python ${{ matrix.python }}, ${{ matrix.os }})
+    needs: wheels
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel, windows-2025, windows-11-arm]
+        python: ['3.11', '3.12', '3.13', '3.14', '3.15', 3.14t, 3.15t]
+    env:
+      PYFLAC_RS_TESTS: full
+    steps:
+      - name: Check out the tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            tests
+            pyproject.toml
+            uv.lock
+      - name: Download the wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: ${{ matrix.python }}
+      # Only the built wheel: --no-index for the package, so a missing wheel
+      # fails instead of falling back to building the sdist.
+      - name: Install the wheel and the test dependencies
+        shell: bash
+        run: |
+          uv venv -q
+          uv pip install --no-index --find-links dist pyflac-rs
+          uv export --only-group dev --no-hashes --no-emit-project \
+            | grep -E '^(numpy|pytest|pytest-timeout|hypothesis|uvloop)==' > test-requirements.txt
+          uv pip install -r test-requirements.txt
+      - name: Run the tests against the installed wheel
+        shell: bash
+        run: uv run --no-project --no-sync python -m pytest -q -ra -p no:cacheprovider tests
+
+  test-musllinux:
+    name: Test musllinux wheel (Alpine, Python ${{ matrix.python }})
+    needs: wheels
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.15']
+    container: python:${{ matrix.python }}-alpine
+    steps:
+      - name: Check out the tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: tests
+      - name: Download the wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: wheels-musllinux-x86_64
+          path: dist
+          merge-multiple: true
+      - name: Install
+        run: |
+          apk add --no-cache flac
+          pip install --no-index --find-links dist pyflac-rs
+          pip install numpy pytest pytest-timeout hypothesis uvloop
+      - name: Run the tests
+        run: PYFLAC_RS_REQUIRE_TOOLS=1 python -m pytest -q -ra -p no:cacheprovider tests
+
+  pack:
+    name: Collect the release files
+    needs: [ci, sdist, test-wheels, test-musllinux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the wheels and the sdist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: '{wheels-*,sdist}'
+          path: dist
+          merge-multiple: true
+      - name: Check every distribution
+        run: python3 scripts/check_dist.py dist
+      - name: Checksums and license notices
+        run: |
+          (cd dist && sha256sum -- * > "$RUNNER_TEMP/SHA256SUMS")
+          mkdir release && cp dist/* "$RUNNER_TEMP/SHA256SUMS" THIRD_PARTY_LICENSES.md release/
+          cat "$RUNNER_TEMP/SHA256SUMS"
+      - name: Upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release
+          path: release
+          retention-days: 30
+
+  publish:
+    name: Publish to PyPI
+    needs: pack
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Trusted publishing (OIDC): PyPI trusts this workflow in the `pypi`
+    # environment; no token is stored. PyPI marks PEP 440 prereleases itself,
+    # so pip skips them unless asked.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/pyflac-rs/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download the release files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: release
+      - name: Keep only the distributions
+        run: mkdir dist && mv release/*.whl release/*.tar.gz dist/
+      - name: Publish (with attestations)
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: dist
+
+  github-release:
+    name: GitHub release
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download the release files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: release
+      - name: Download the release notes
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: notes
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          pre=()
+          case "$GITHUB_REF_NAME" in *-*) pre=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md "${pre[@]}" release/*
